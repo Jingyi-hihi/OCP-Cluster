@@ -1,0 +1,1470 @@
+ON the DNS,
+
+add Conditional Forwarder to stand alone DNS 
+so that queries to other domains can be forwarded through it
+
+DNS -> Conditional Forwarder -> Create New Conditional Forwarder -> add domain and IP of standalone DNS
+
+
+SAMPLE Adding extra HDD
+----------------------------
+fdisk /dev/sdb
+n
+p
+press enter 3 times to accept default values
+
+w
+
+exit fdisk
+
+
+lsblk -f
+sudo mkfs -t ext4 /dev/sdb1
+sudo mount -t auto /dev/sdb1 /tmp/var
+------------------------------------------------
+
+====================================================
+Create Local Repo FOR ALL RHEL VM
+====================================================
+
+FOR DVD REPO
+----------------
+mkdir -p /mnt/rhel
+mount -o loop /dev/sr0 /mnt/rhel
+
+sudo cp /mnt/rhel/media.repo /etc/yum.repos.d/media.repo
+sudo chmod 644 /etc/yum.repos.d/media.repo
+
+sudo vi /etc/yum.repos.d/media.repo
+
+
+[dvd-BaseOS]
+name=DVD for RHEL8 - BaseOS
+baseurl=file:///mnt/rhel/BaseOS
+enabled=1
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release
+
+[dvd-AppStream]
+name=DVD for RHEL8 - AppStream
+baseurl=file:///mnt/rhel/AppStream
+enabled=1
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release
+
+------------------------------------------------------------------------
+
+FOR DISCONNECTED REPO
+--------------------------
+
+[BaseOS]
+name=BaseOS
+baseurl=https://url.to.repo/BaseOS/
+enabled=1
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release
+
+[AppStream]
+name=AppStream
+baseurl=https://url.to.repo/AppStream
+enabled=1
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release
+
+yum clean all
+yum repolist enabled
+
+
+If Repo requires SSL
+get the RCA and ICA certificate for the repo
+
+cp rca.cer /etc/pki/ca-trust/source/anchors/
+cp ica.cer /etc/pki/ca-trust/source/anchors/
+
+update-ca-trust
+
+============================================
+CREATE USER ACCOUNT FOR ALL RHEL VM
+============================================
+useradd ocpa_admin1
+passwd ocp_admin1
+Enter new password 
+
+usermod -aG wheel ocpa_admin1
+
+================================================
+Configure NTP Chrony for Bastion and HAProxy
+================================================
+
+edit /etc/chrony.conf
+
+server xxx.xxx.xxx.xxx iburst
+driftfile /var/lib/chrony/drift
+makestep 1.0 3
+rtcsync
+logdir /var/log/chrony
+maxdistance 16.0
+
+
+===================================================
+update audit backlog limit for Bastion, HAProxy
+===================================================
+USE ROOT
+#update audit_backlog_limit to 8192 to prevent audit: kauditd hold queue overflow
+grubby --update-kernel=ALL --args="audit_backlog_limit=8192"
+
+=========================================================
+Create Cronjob for Bastion, HAProxy
+=========================================================
+
+#delete audit logs older than 40 days, run once every sunday at midnight
+Use root user
+
+crontab -e
+0 0 * * 0 find /var/log/audit -type f -name "*.log.*" -mtime +40 -exec rm {} \;
+
+==========================
+1st HAProxy
+==========================
+
+sudo yum install haproxy policycoreutils-python-utils keepalived chrony -y
+
+vi /etc/resolv.conf
+
+nameserver xxx.xxx.xxx.xxx
+
+sudo setsebool -P haproxy_connect_any on
+
+sudo firewall-cmd --permanent --add-service=http
+sudo firewall-cmd --permanent --add-service=https
+sudo firewall-cmd --permanent --add-22623/tcp
+sudo firewall-cmd --permanent --add-port=6443/tcp
+sudo firewall-cmd --reload
+
+sudo vi /etc/haproxy/haproxy.cfg
+
+
+global
+  log 127.0.0.1 local2
+  pidfile /var/run/haproxy.pid
+  maxconn 4000
+  daemon
+defaults
+  mode http
+  log global
+  option dontlognull
+  option http-server-close
+  option redispatch
+  retries 3
+  timeout http-request 10s
+  timeout queue 1m
+  timeout connect 10s
+  timeout client 1m
+  timeout server 1m
+  timeout http-keep-alive 10s
+  timeout check 10s
+  maxconn 3000
+frontend stats
+  bind *:1936
+  mode http
+  log global
+  maxconn 10
+  stats enable
+  stats hide-version
+  stats refresh 30s
+  stats show-node
+  stats show-desc Stats for ocp4 cluster
+  stats auth admin:ocp4
+  stats uri /stats
+listen api-server-6443
+  bind *:6443
+  mode tcp
+  option  httpchk GET /readyz HTTP/1.0
+  option  log-health-checks
+  balance roundrobin
+  server bootstrap <bootstrap-hostname>:6443 verify none check check-ssl inter 10s fall 2 rise 3 backup
+  server master0 <master1-hostname>:6443 weight 1 verify none check check-ssl inter 10s fall 2 rise 3
+  server master1 <master2-hostname>:6443 weight 1 verify none check check-ssl inter 10s fall 2 rise 3
+  server master2 <master3-hostname>:6443 weight 1 verify none check check-ssl inter 10s fall 2 rise 3
+listen machine-config-server-22623
+  bind *:22623
+  mode tcp
+  server bootstrap <bootstrap-hostname>:22623 check inter 1s backup
+  server master0 <master1-hostname>:22623 check inter 1s
+  server master1 <master2-hostname>:22623 check inter 1s
+  server master2 <master3-hostname>:22623 check inter 1s
+listen ingress-router-443
+  bind *:443
+  mode tcp
+  balance source
+  server ingress1 <ingress1-hostname>:443 check inter 1s
+  server ingress2 <ingress2-hostname>:443 check inter 1s
+listen ingress-router-80
+  bind *:80
+  mode tcp
+  balance source
+  server ingress1 <ingress1-hostname>:80 check inter 1s
+  server ingress2 <ingress2-hostname>:80 check inter 1s
+
+sudo vi /etc/keepalived/keepalived.conf
+
+edit <lb-vip>
+take note of "interface enp1s0" (need to change if the network interface name is different)
+---------------------------------------------------------
+Master Node
+global_defs {
+  router_id ovp_vrrp #Hostname of this host
+}
+vrrp_script haproxy_check {
+  script "killall -0 haproxy"
+  interval 2
+  weight 100
+}
+
+vrrp_instance OCP_LB {
+  state MASTER
+  interface enp1s0
+  virtual_router_id 215
+  priority 100
+  advert_int 1
+  virtual_ipaddress {
+    <lb-vip>
+  }
+  track_script {
+    haproxy_check
+  }
+  authentication {
+    auth_type PASS
+    auth_pass redhat
+  }
+}
+
+sudo systemctl enable keepalived --now
+sudo systemctl enable haproxy --now
+
+==========================
+2nd HAProxy
+==========================
+
+sudo yum install haproxy policycoreutils-python-utils keepalived chrony -y
+
+vi /etc/resolv.conf
+
+nameserver xxx.xxx.xxx.xxx
+
+sudo setsebool -P haproxy_connect_any on
+sudo firewall-cmd --permanent --add-service=http
+sudo firewall-cmd --permanent --add-service=https
+sudo firewall-cmd --permanent --add-22623/tcp
+sudo firewall-cmd --permanent --add-port=6443/tcp
+sudo firewall-cmd --reload
+
+
+<<< =====COPY CONFIG FROM PROXY01===== >>>
+
+
+sudo vi /etc/keepalived/keepalived.conf
+
+edit <lb-vip>
+take note of "interface enp1s0" (need to change if the network interface name is different)
+
+---------------------------------------------------------
+global_defs {
+  router_id ovp_vrrp #hostname of this host
+}
+
+vrrp_script haproxy_check {
+  script "killall -0 haproxy"
+  interval 2
+  weight 90
+}
+
+vrrp_instance OCP_LB {
+  state BACKUP
+  interface enp1s0
+  virtual_router_id 215
+  priority 50
+  advert_int 1
+  virtual_ipaddress {
+    <lb-vip>
+  }
+  track_script {
+    haproxy_check
+  }
+  authentication {
+    auth_type PASS
+    auth_pass redhat
+  }
+}
+
+
+sudo systemctl enable keepalived --now
+sudo systemctl enable haproxy --now
+
+==========================
+Bastion
+==========================
+
+yum install podman chrony httpd
+
+#configure ntp
+vi /etc/chrony.conf
+
+server 232.xxx.xxx.xxx iburst
+server 444.xxx.xxx.xxx iburst
+
+#configure dns
+vi /etc/resolv.conf
+
+nameserver xxx.xxx.xxx.xxx
+
+hostnamectl set-hostname bastion.cluster.domain.com
+
+mkdir /opt/ocp
+
+-------------------------------
+
+Adding extra HDD (600gb) (/opt/ocp)
+----------------------------
+fdisk /dev/sdb
+n
+p
+press enter 3 times to accept default values
+
+w
+
+exit fdisk
+
+
+lsblk -f
+sudo mkfs -t ext4 /dev/sdb1
+mkdir /opt/ocp
+mount /dev/sdb1 /opt/ocp
+
+vi /etc/fstab
+
+add the mount into fstab
+
+Adding 300gb disk via LVM (extend /home)
+=======================
+fdisk /dev/sdc
+n
+p
+press enter 3 times to accept default values
+
+w
+
+exit fdisk
+
+
+pvs to see PVs
+vgs to see VGs
+lvs to see LVs
+
+
+lsblk to find the mount info for "/"
+example "/dev/mapper/rhel-home"
+
+example "rhel" is the volume group name
+
+pvcreate /dev/sdc1
+
+vgextend rhel /dev/sdc1
+
+lvextend -l +100%FREE /dev/rhel/home
+
+xsf_growfs /dev/rhel/home
+
+openshift-client-linux-4.12.2.tar.gz
+openshift-install-linux-4.12.2.tar.gz
+
+tar -xzvf openshift-client-linux-4.12.2.tar.gz
+
+sudo cp oc /usr/bin/
+sudo cp kubectl /usr/bin/
+oc version
+
+
+tar -xzvf openshift-install-linux-4.12.2.tar.gz
+
+
+sudo cp openshift-install /usr/bin/
+openshift-install version
+
+Allow firewall
+--------------
+sudo firewall-cmd --permanent --add-service=http
+sudo firewall-cmd –reload
+
+
+==================
+DNS
+==================
+On the DNS
+1.	Add the VMs IP into the DNS
+           bastion.clustername.domain.com
+           proxy01.clustername.domain.com
+           proxy02.clustername.domain.com
+           quay.clustername.domain.com
+           bootstrap.clustername.domain.com
+           masterxx.clustername.domain.com
+           workerxx.clustername.domain.com
+2.	Ensure Reverse lookup is created.
+a.	Manually create the reverse lookup if not created
+3.	Add api.<cluster-name>.<domain-name>  (IP of <lb-vip>)
+4.	Add api-int.<cluster-name>.<domain-name>  (IP of <lb-vip>)
+5.	Add *.apps.<cluster-name>.<domain-name>  (IP of <lb-vip>)
+
+Using powershell to add DNS records
+Add-DnsServerResourceRecordA -ZoneName "example.com" -Name "host1" -IPv4Address "192.168.1.100"
+
+Add-DnsServerResourceRecordPtr -ZoneName "1.168.192.in-addr.arpa" -Name "100" -PtrDomainName "host1.example.com"
+
+
+
+Bastion
+=============
+Copy the rootCA.pem from mirror registry into Bastion Node /tmp also
+sudo cp /tmp/rootCA.pem /etc/pki/ca-trust/source/anchors/
+
+sudo update-ca-trust
+podman login -u init -p <password> <host_example_com>:8443
+
+
+echo -n 'init:<mirror-registry-password>' | base64 -w0
+
+(put the output into "auth" field below)
+
+cat /opt/ocp/pull-secret.text | jq . > /opt/ocp/pull-secret-mirror.txt
+
+
+{
+  "auths": {
+    "<disconnected-registry-hostname>:8443": {
+     "auth": "BGVtbYk3ZHAtqXs=",
+     "email": "<email>"
+    }
+  }
+}
+
+
+==============================================
+Unauthorized permission error for registry
+==============================================
+For any permission or unauthorized errors, 
+check both locations for the config.json or auth.json file.
+IF both files exist, 
+~/.docker/config.json
+$XDG_RUNTIME_DIR/containers/auth.json
+
+Ensure both files have the mirror register credentials. If 1 file has and the other files doesn't, it might cause authorized error.
+To make it simple, only have 1 file with the credentials. Rename or delete the other file.
+
+If you still have unauthorized error, it could be the $XDG_RUNTIME_DIR is empty.
+usually, $XDG_RUNTIME should have /run/user/0 for root
+or 
+/run/user/1xxx for normal user (depending on uid)
+
+you can find your uid from 
+id -u <username>
+
+if you echo $XDG_RUNTIME_DIR and it is blank, then you need to manually add the path to XDG_RUNTIME_DIR. Type,
+export XDG_RUNTIME_DIR=/run/user/0
+or 
+export XDG_RUNTIME_DIR=/run/user/1xxx
+
+after you define the XDG_RUNTIME_DIR, do a podman login to the register and the auth.json should be automatically created.
+If it didn't create, then check the other folder path
+
+How is the oc mirror authentication is working
+The authentication works based on the credentials (pull-secret) present in the location ~/.docker/config.json or $XDG_RUNTIME_DIR/containers/auth.json. The first priority goes to the file ~/.docker/config.json, and if the directory ~/.docker is not present, then the credentials will be read from $XDG_RUNTIME_DIR/containers/auth.json.
+
+======================================
+add user and generate new private key
+======================================
+useradd ocpa_admin1
+usermod -aG wheel ocpa_admin1
+passwd ocpa_admin1
+su ocpa_admin1
+ssh-keygen -t rsa -N ''
+cat ~/.ssh/id_rsa.pub        (save this string to somewhere, to be put into install-config)
+
+
+ssh-rsa AAAAB3NzaC1yc2.......I9DYFmE= ocpa_admin1@bastion.example.com
+
+#run the ssh agent
+eval "$(ssh-agent -s)"
+
+#add the private key into agent
+ssh-add ~/.ssh/id_rsa
+
+mkdir -p /opt/ocp/install/ocp-installation-<date>
+
+echo -n 'init:<mirror-registry-password>' | base64 -w0
+
+save the generated text somewhere (base64-auth-cerds)
+
+
+CHECK MIRROR REGISTRY TO SEE WHERE THE OCP IMAGES ARE
+=============================================================
+locate the results-xxxxx folder that is created after mirroring images into the mirror registry.
+The file should contain the path to the platform images.
+
+CHECK THE ICSP (imageContentSourcePolicy for the ocp image path, it may be different for the 2 paths used in the install-config)
+take note of the paths and replace in the install-config.yaml
+
+replace below lines: <disconnected-registry-hostname>:8443/openshift/release
+if different in the ICSP or the mirror registry
+
+vi /opt/ocp/install/install-config.yaml.bak
+
+apiVersion: v1
+baseDomain: <base-domain>
+compute:
+- hyperthreading: Enabled
+  name: worker
+  replicas: 0
+controlPlane:
+  hyperthreading: Enabled
+  name: master
+  replicas: 3
+metadata:
+  name: <cluster-name>
+networking:
+  clusterNetwork:
+  - cidr: <cluster-cidr> ###default 10.128.0.0/14
+    hostPrefix: 23
+  networkType: OVNKubernetes
+  serviceNetwork:
+  - <service-cidr> ###default 13.10.0.0/16
+platform:
+    none: {}
+fips: false
+pullSecret: '{"auths":{"<disconnected-registry-hostname>:8443":{"auth":"<base64-auth-cerds>"}}}'
+imageContentSources:
+- mirrors:
+  - <disconnected-registry-hostname>:8443/openshift/release
+  source: quay.io/openshift-release-dev/ocp-release
+- mirrors:
+  - <disconnected-registry-hostname>:8443/openshift/release
+  source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
+sshKey: 'ssh-rsa <ssh-public-key> ocpa_admin1@<bastion-hostname>'
+additionalTrustBundle: |
+     -----BEGIN CERTIFICATE-----
+     <root CA certification-for-mirror-registry>
+     -----END CERTIFICATE-----
+
+
+cp install-config.yaml.bak /opt/ocp/install/ocp-installation-<date>/
+
+
+MUST create in a new folder everytime you generate manifest
+=======================================
+cd /opt/ocp/install/ocp-installation-<date>/
+
+
+Generate new files
+=============================
+openshift-install create manifests --dir .
+
+ls
+
+vi manifests/cluster-scheduler-02-config.yml
+
+apiVersion: config.openshift.io/v1
+kind: Scheduler
+metadata:
+  creationTimestamp: null
+  name: cluster
+spec:
+  mastersSchedulable: false
+  policy:
+    name: ""
+status: {}
+
+
+***Add NTP chrony.yaml files into manifest folder as well so that new ocp nodes will have the ntp config***
+========================================================================================================
+
+REPLACE {{ ntp_ip }} WITH THE REAL NTP IP
+
+vi manifests/99-master-chrony.yaml
+
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  labels:
+    machineconfiguration.openshift.io/role: master
+  name: 99-master-chrony
+spec:
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+        - contents:
+            compression: ""
+            source: data:,server%20{{ ntp_ip }}%20iburst%0Adriftfile%20%2Fvar%2Flib%2Fchrony%2Fdrift%0Amakestep%201.0%203%0Artcsync%0Alogdir%20%2Fvar%2Flog%2Fchrony%0Amaxdistance%2016.0%0A
+          mode: 420
+          overwrite: true
+          path: /etc/chrony.conf
+
+
+vi manifests/99-worker-chrony.yaml
+
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  labels:
+    machineconfiguration.openshift.io/role: worker
+  name: 99-worker-chrony
+spec:
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+        - contents:
+            compression: ""
+            source: data:,server%20{{ ntp_ip }}%20iburst%0Adriftfile%20%2Fvar%2Flib%2Fchrony%2Fdrift%0Amakestep%201.0%203%0Artcsync%0Alogdir%20%2Fvar%2Flog%2Fchrony%0Amaxdistance%2016.0%0A
+          mode: 420
+          overwrite: true
+          path: /etc/chrony.conf
+
+
+openshift-install create ignition-configs --dir .
+
+mkdir /var/www/html/ocp
+cp *.ign /var/www/html/ocp/
+
+chmod 755 /var/www/html/ocp
+chmod 755 /var/www/html/ocp/*.ign
+
+ls
+
+yum install -y httpd
+systemctl enable httpd
+systemctl start httpd
+mkdir -p /var/www/html/ocp/ignition
+cp *.ign /var/www/html/ocp/ignition
+
+=======================================
+BOOTSTRAP
+=======================================
+
+sudo -i
+if no DHCP
+
+nmtui
+set ip, set gateway, set dns
+activate the network card
+Test curl http://<bastion-ip>/ocp4/ignition/bootstrap.ign
+
+IF there is DHCP,
+Test curl http://<bastion-ip>/ocp4/ignition/bootstrap.ign
+
+If sucessful, run
+
+sudo coreos-installer install --insecure-ignition --copy-network
+--ignition-url=http://<bastion-ip>/ocp4/ignition/bootstrap.ign
+/dev/sda
+
+
+sudo umount -l /run/media/iso
+sudo eject /dev/sr0 -F
+sudo /sbin/shutdown -r +1
+
+It will eject cd and reboot
+After reboot, it will take awhile for bootstrap to be ready
+
+To see progress
+ON Bastion,
+ssh core@<Bootstrap_IP>
+press yes for known_hosts
+If known_hosts already exist, go to 
+vi ~/.ssh/known_hosts
+remove the entry for the bootstrap
+
+journalctl -b -f -u release-image.service -u bootkube.service
+
+=======
+REPEAT the bootstrap steps for Master and Worker nodes
+=======
+
+
+Create worker VMs
+For normal/infra Worker VMs, attach 120 GB Hdd
+For storage VMs, attach 2x 2TB hdds, attach 1x 120GB hdd for OS
+
+
+### For master nodes ###
+coreos-installer install --insecure-ignition --copy-network
+--ignition-url=http://<bastion-ip>/ocp4/ignition/master.ign /dev/sda
+
+
+### for all other nodes ###
+coreos-installer install --insecure-ignition --copy-network
+--ignition-url=http://<bastion-ip>/ocp4/ignition/worker.ign /dev/sda
+
+
+
+On Bastion, enter
+openshift-install --dir=./ wait-for bootstrap-complete --log-level=debug
+
+
+After install done,
+on bastion node:
+export KUBECONFIG=/opt/ocp/install/ocp-installation-<date>/auth/kubeconfig
+oc get nodes
+Now should only show masters
+
+
+If masters are up, on bastion enter
+oc get csr -o name | xargs oc adm certificate approve
+
+on bastion, enter
+openshift-install wait-for install-complete --log-level=debug
+
+To monitor the progress, type 
+watch oc get co
+Once all CO are available are True, installation is complete
+
+
+Remove bootstrap from HAProxy (restart 1 proxy at a time)
+
+comment out the Bootstrap IP from /etc/haproxy/haproxy.cfg
+restart the haproxy
+systemctl restart haproxy
+
+
+openshift-install wait-for install-complete --log-level=info
+
+
+Add htpasswd user for OCP dashboard login
+-------------------------------------------
+
+htpasswd -c -B -b htpasswd.txt admin P@ssw0rd1
+
+oc create secret generic consoleadminsecret --from-file=htpasswd=htpasswd.txt -n openshift-config
+
+oc get oauth cluster -o yaml > oauth.yaml
+
+edit the oauth.yaml file
+
+remove the following lines
+-----------------------------------------
+include.release.openshift.io/ibm-cloud-managed: "true"
+include.release.openshift.io/self-managed-high-availability: "true"
+include.release.openshift.io/single-node-developer: "true"
+creationTimestamp: "2021-08-18T13:04:49Z"
+resourceVersion: "65628"
+uid: 1730f3ff-82da-46c8-8bf3-7aae3ec83194
+
+Replace spec: {} with the following
+spec:
+  identityProviders:
+  - name: htpasswd_provider 
+    mappingMethod: claim 
+    type: HTPasswd
+    htpasswd:
+      fileData:
+        name: consoleadminsecret
+
+
+Save the file
+
+TYPE:
+oc apply -f oauth.yaml
+
+login new user first time
+
+Wait 2-3 minutes before applying new policy for user
+oc adm policy add-cluster-role-to-user cluster-admin admin
+
+
+unset KUBECONFIG
+oc login -u admin -p P@ssw0rd1
+https://api.ocp4.mycluster.ost:6443
+Use insecure connections? (y/n) y
+
+login should be successful
+
+oc get nodes
+
+You should see all nodes
+
+
+TO ADD MORE USERS:
+====================================================================================================
+
+RETRIEVE CURRENT USERS FROM OCP
+=======================================================
+oc get secret consoleadminsecret -ojsonpath={.data.htpasswd} -n openshift-config | base64 --decode > users.htpasswd
+
+ADD NEW USER:
+htpasswd -bB users.htpasswd <username> <password>
+
+REMOVE EXISTING USER:
+htpasswd -D users.htpasswd <username>
+
+REPLACE THE consoleadminsecret
+oc create secret generic consoleadminsecret --from-file=htpasswd=users.htpasswd --dry-run=client -o yaml -n openshift-config | oc replace -f -
+
+you can check the secret from the web console
+Workloads -> secret
+
+consoleadminsecret -> click and copy data
+paste data in notepad
+you should see the new user inside the secret
+
+wait a few minutes for the new secret to take effect
+
+If a user was deleted, 
+perform additional commands to clean up
+
+oc delete user <username>
+oc delete identity my_htpasswd_provider:<username>
+
+Assign role to user.
+You can see what roles there are on the web console
+oc adm policy add-cluster-role-to-user <<role>> <<user>>
+
+Assign user admin rights to a specific namespace
+oc adm policy add-role-to-user admin tada_admin -n project_name
+
+if it still says user not found,
+type:
+
+oc edit oauth
+then change consoleadminsecret to consoleadminsecret2
+
+then save and exit
+
+then edit oauth again
+then change consoleadminsecret2 back to consoleadminsecret
+
+then save and exit
+
+This should re-init the oauth and read the new secret
+
+after you succesfully add role to user, logout the web console and login using new user
+From user management menu -> users, you should see the new user
+
+---------------------------------------------------------------------------------------
+Change NTP (SKIP IF NTP ALREADY CONFIGURED DURING MANIFESTS GENERATION)
+
+
+vi 99-master-chrony.bu
+
+variant: openshift
+version: 4.12.0
+metadata:
+  name: 99-master-custom
+  labels:
+    machineconfiguration.openshift.io/role: master
+storage:
+  files:
+    - path: /etc/chrony.conf
+      mode: 0644
+      overwrite: true
+      contents:
+        inline: |
+          server 112.124.101.1 iburst
+          driftfile /var/lib/chrony/drift
+          makestep 1.0 3
+          rtcsync
+          logdir /var/log/chrony
+          maxdistance 16.0
+
+
+vi 99-worker-chrony.bu
+
+variant: openshift
+version: 4.12.0
+metadata:
+  name: 99-worker-custom
+  labels:
+    machineconfiguration.openshift.io/role: worker
+storage:
+  files:
+    - path: /etc/chrony.conf
+      mode: 0644
+      overwrite: true
+      contents:
+        inline: |
+          server 112.124.101.1 iburst
+          driftfile /var/lib/chrony/drift
+          makestep 1.0 3
+          rtcsync
+          logdir /var/log/chrony
+          maxdistance 16.0
+
+
+butane 99-master-chrony.bu -o 99-master-chrony.yaml
+butane 99-worker-chrony.bu -o 99-worker-chrony.yaml
+
+
+oc apply -f 99-master-chrony-conf.yaml
+oc describe machineconfigpool
+
+
+oc apply -f 99-worker-chrony-conf.yaml
+oc describe machineconfigpool
+
+Disable OperatorHub Default Sources
+=======================================
+oc patch OperatorHub cluster --type json -p '[{"op": "add", "path": "/spec/disableAllDefaultSources"; "value": true}]'
+
+
+From UI,
+Administration -> Cluster Settings -> Configuration -> OperatorHub -> Sources -> Disable the 4 default sources
+
+
+(FOR EACH NEW CLUSTER)
+Assume Mirror Registry is already updated with the operator images.
+Find the results-xxxxx folder on the mirror registry where you mirrored the operator images.
+---------------------------
+oc login -u admin https://api.cluster.example.com:6443
+oc apply -f ./oc-mirror-workspace/results-<>/
+
+Verify the imagecontentsources successfully installed
+--------------------------------------------------------------
+oc get imagecontentsourcepolicy --all-namespaces
+
+Verify catalog source successfully installed
+--------------------------------------------------
+oc get catalogsource --all-namespaces
+
+
+If the marketplace is not updating, enter
+oc get pod -n openshift-marketplace
+
+oc delete pod xx-redhat-operator-index-xxxxx -n openshift-marketplace
+oc delete pod xx-certified-operator-index-xxxxx -n openshift-marketplace
+
+Label and Taint Nodes
+====================================
+DO this after all the different worker nodes are up
+oc get nodes
+oc label node <infra-node> node-role.kubernetes.io/infra=
+oc label node <storage-node> node-role.kubernetes.io/storage=
+
+oc adm taint node <infra-node>  node-role.kubernetes.io/infra:NoSchedule
+(DO not Taint If using ODF Operator)  oc adm taint node <storage-node>  node-role.kubernetes.io/storage:NoSchedule
+oc adm taint node <hub-node>  node-role.kubernetes.io/hub:NoSchedule
+
+Assign a machineConfigPool for the different roles
+=====================================================
+On Bastion,
+cd opt/ocp/ocp-config/machineconfig
+mkdir machineconfigpool
+cd machineconfigpool
+vi infra-mcp.yaml
+
+
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfigPool
+metadata:
+  name: infra
+spec:
+  machineConfigSelector:
+    matchExpressions:
+      - {key: machineconfiguration.openshift.io/role, operator: In, values:[worker,infra]}
+  maxUnavailable: null
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/infra: ""
+  paused: false
+
+
+oc apply -f infra-mcp.yml
+
+
+
+vi storage-mcp.yaml
+
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfigPool
+metadata:
+  name: storage
+spec:
+  machineConfigSelector:
+    matchExpressions:
+      - {key: machineconfiguration.openshift.io/role, operator: In, values:[worker,storage]}
+  maxUnavailable: null
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/storage: ""
+  paused: false
+
+oc apply -f storage-mcp.yaml
+
+
+
+Wait for all nodes to be Updated and Ready, should see 4 MCP
+=============================================
+oc get mcp
+
+
+Move the ingress pods to infra
+=======================================
+
+Via Dashboard UI
+Dashboard -> Administration -> CRD -> Ingresscontroller -> instances -> Default
+edit the yaml 
+add tolerations and nodeSelector
+
+spec:
+  nodePlacement:
+    nodeSelector:
+      matchLabels:
+        node-role.kubernetes.io/infra: ""
+    tolerations:
+    - effect: "NoSchedule"
+      key: "node-role.kubernetes.io/infra"
+      value: ""
+
+Via Command Line on Bastion
+oc patch ingresscontroller.operator default --type=merge -n openshift-ingress-operator -p '{"spec":{"nodePlacement":{"nodeSelector":{"matchLabels":{"node-role.kubernetes.io/infra": ""}},"tolerations":[{"effect":"NoSchedule","key":"node-role.kubernetes.io/infra","value":""}]}}}'
+
+oc get pods -n openshift-ingress
+
+oc get co | grep ingress
+
+
+
+AD Authentication
+=========================
+
+oc create secret generic ad-secret --from-literal=bindPassword=<secret> -n openshift-config
+
+oc create configmap ca-config-map --from-file=ca.crt=/path/to/ca.pem -n openshift-config (add root cert for OCP to trust the cert from LDAP)
+
+vi opt/ocp/ocp-config/authentication/ad/ad-cr.yaml
+
+apiVersion: config.openshift.io/v1
+kind: OAuth
+metadata:
+  name: cluster
+spec:
+  identityProviders:
+  - name: AD
+    mappingMethod: claim
+    type: LDAP
+    ldap:
+      attributes:
+        id:
+        - sAMAccountName
+        name:
+        - givenName
+        preferredUsername:
+        - sAMAccountName
+        bindDN: "<bind-dn-username>"
+        bindPassword:
+          name: ad-secret
+        ca:
+          name: ca-config-map
+        insecure: false
+        url: "ldaps://<ad-server-ip>/ou=users,DC=intranet,DC=<dc-value-1>,DC=<dc-value-2>,DC=<dc-value-3>?sAMAccountName"
+
+(REMOVE ou=users if not required)
+
+oc apply -f /opt/ocp/ocp-config/authentication/ad/ad-cr.yaml
+
+Wait for the new authentication pods to roll out. The new option "AD" should be available when
+logging in from the console.
+
+To apply the cluster-admin role to a user, first login as that user to OpenShift, followed by the
+command below.
+
+oc adm policy add-cluster-role-to-user cluster-admin <admin-user> clusterrole.rbac.authorization.k8s.io/view added: "<admin-user>"
+
+
+
+Install the ODF Storage Operator
+==============================================
+
+Perform the following steps to deploy OpenShift Data Foundation:
+1. Install the Local Storage Operator
+2. Install the Red Hat OpenShift Data Foundation Operator
+3. Create an OpenShift Data Foundation cluster on bare metal
+
+
+Installing Local Storage Operator
+=====================================
+1. Log in to the OpenShift Web Console.
+2. Click Operators → OperatorHub.
+3. Type local storage in the Filter by keyword box to find the Local Storage Operatorfrom the
+list of operators, and click on it.
+4. Set the following options on the Install Operator page:
+  a. Update channel as either 4.12 or stable.
+  b. Installation mode as "A specific namespace" on the cluster.
+  c. Installed Namespace as Operator recommended namespace "openshift-local-storage".
+  d. Update approval as Automatic.
+5. Click Install.
+Verification steps
+Verify that the Local Storage Operator shows a green tick indicating successful installation.
+
+Installing Openshift Data Foundation Operator
+==============================================
+
+1. Log in to the OpenShift Web Console.
+2. Click Operators → OperatorHub.
+3. Scroll or type OpenShift Data Foundation into the Filter by keyword box to find the OpenShift Data Foundation Operator.
+4. Click Install.
+5. Set the following options on the Install Operator page:
+  a. Update Channel as stable-4.12.
+  b. Installation Mode as A specific namespace on the cluster.
+  c. Installed Namespace as Operator recommended namespace openshift-storage. If Namespace openshift-storage does not exist, it is created during the operator installation.
+  d. Select Approval Strategy as Automatic or Manual.
+  If you select Automatic updates, then the Operator Lifecycle Manager (OLM) automatically upgrades the running instance of your Operator without any intervention.
+  If you select Manual updates, then the OLM creates an update request. As a cluster administrator, you must then manually approve that update request to update the Operator
+  to a newer version.
+  e. Ensure that the Enable option is selected for the Console plugin.
+  f. Click Install.
+Verification steps
+  After the operator is successfully installed, a pop-up with a message, Web console update is
+  available appears on the user interface. Click Refresh web consolefrom this pop-up for the
+  console changes to reflect.
+In the Web Console:
+  Navigate to Installed Operators and verify that the OpenShift Data Foundation Operator shows a green tick indicating successful installation.
+  Navigate to Storage and verify if Data Foundation dashboard is available.
+
+
+Create an OpenShift Data Foundation cluster on bare metal
+===========================================================
+Create Storage System
+
+1. In the OpenShift Web Console, click Operators → Installed Operators to view all the installed operators. 
+         Ensure that the Project selected is openshift-storage.
+2. Click on the OpenShift Data Foundation operator, and then click Create StorageSystem.
+3. In the Backing storage page, perform the following:
+  a. Select Full Deployment for the Deployment typeoption.
+  b. Select the Create a new StorageClass using the local storage devicesoption.
+  c. Click Next.
+
+4. In the Create local volume setpage, provide the following information:
+  a. Enter a name for the LocalVolumeSet and the StorageClass.
+        The local volume set name appears as the default value for the storage class name. You can change the name.
+  b. Select the following:
+      Disks on selected nodes
+      Uses the available disks that match the selected filters only on the selected nodes.
+
+  c. From the available list of Disk Type, select SSD/NVMe. (or All disks)
+  d. Expand the Advanced section and set the following options
+	Volume Mode: Block is selected as the default value.
+	Device Type: Select one or more device type from the dropdown list.
+	Disk Size: Set a minimum size of 100GB for the device and maximum available size of the device that needs to be included.
+	Maximum Disks Limit: This indicates the maximum number of Persistent Volumes (PVs) that you can
+		create on a node. If this field is left empty, then PVs are created for all the
+		available disks on the matching nodes.
+
+
+  e. Click Next. A pop-up to confirm the creation of LocalVolumeSet is displayed.
+  f. Click Yes to continue.
+
+5. In the Capacity and nodespage, configure the following:
+  a. Available raw capacity is populated with the capacity value based on all the attached disks associated with the storage class. This takes some time to show up. The Selected nodes list shows the nodes based on the storage class.
+  b. Optional: Select the Taint nodes checkbox to dedicate the selected nodes for OpenShift Data Foundation.
+  c. Click Next.
+
+6 (Optional) Security and Network
+
+7. In the Review and createpage, review the configuration details. To modify any configuration settings, click Back to go back to the previous configuration page.
+8. Click Create StorageSystem
+
+Verification steps
+To verify the final Status of the installed storage cluster:
+a. In the OpenShift Web Console, navigate to Installed Operators → OpenShift Data
+Foundation → Storage System
+b. Click ocs-storagecluster-storagesystem → Resources.
+c. Verify that the Status of the StorageCluster is Ready and has a green tick mark next to it.
+
+
+To verify if the flexible scaling is enabled on your storage cluster, perform the following steps (for arbiter mode, flexible scaling is disabled):
+  1. In the OpenShift Web Console, navigate to Installed Operators → OpenShift Data Foundation → Storage System
+  2. Click ocs-storagecluster-storagesystem → Resources → ocs-storagecluster.
+  3. In the YAML tab, search for the keys flexibleScaling in the spec section and failureDomain in the status section. If flexible scaling is true and failureDomain is set to host, flexible scaling feature is enabled
+
+spec:
+flexibleScaling: true
+[…]
+status:
+failureDomain: host
+
+
+Go to StorageClasses
+Select the RBD storageclass
+Edit YAMLL
+Under Annotations:
+  storageclass.kubernetes.io/is-default-class: 'true'
+Save YAML
+
+
+===========================================================
+APPLY CUSTOM MESSAGE TO OCP LOGIN SCREEN
+===========================================================
+
+==Get the existing templates==
+POD=$(oc get pods -n openshift-authentication -o name | head -n 1)
+oc exec -n openshift-authentication "$POD" -- cat /var/config/system/v4-0-config-system-ocp-branding-template/errors.html > errors.html
+oc exec -n openshift-authentication "$POD" -- cat /var/config/system/v4-0-config-system-ocp-branding-template/login.html > login.html
+oc exec -n openshift-authentication "$POD" -- cat /var/config/system/v4-0-config-system-ocp-branding-template/providers.html > providers.html
+
+==Edit html to add custom message to each template==
+vi errors.html
+under the <div class="pf-c-login__main-body">, add the custom message to be displayed
+
+vi login.html
+under the <div class="pf-c-login__main-body">, add the custom message to be displayed
+
+vi providers.html
+under the <div class="pf-c-login__main-body">, add the custom message to be displayed
+
+==create a secret for each template==
+oc create secret generic login-template --from-file login.html -n openshift-config
+oc create secret generic error-template --from-file error.html -n openshift-config
+oc create secret generic providers-template --from-file providers.html -n openshift-config
+
+==update the oauth to use the new templates==
+oc edit oauth cluster
+
+Add this under spec
+
+spec:
+  templates:
+    error:
+      name: error-template
+    login:
+      name: login-template
+    providerSelection:
+      name: providers-template
+
+Save and exit
+
+===============FOR AUTOMATION====================
+oc patch oauths cluster --type=json -p='[ { "op": "add", "path": "/spec/templates", "value": { "error": { "name": "error-template" }, "providerSelection": { "name": "providers-template" }, "login": { "name": "login-template" } } } ]'
+
+
+==Wait for the new pods to be created==
+watch oc get pods -n openshift-authentication
+
+
+
+=====================================================================================
+DEPLOY INTERNAL QUAY
+=====================================================================================
+
+
+Deploy internal quay
+
+Install Redhat Quay Operator
+1. Select All Namespaces
+2. Select Automatic Updates
+3. Click Install
+4. Wait 10 minutes for installation to complete
+
+oc new-project quay-enterprise
+
+Go to Installed Operators -> Redhat Quay -> Quay Registry -> Create Quay Registry
+1. Enter a name (internal-reg)
+2. Leave Config Bundle Secret blank
+3. Click Create
+4. Wait 5 minutes for the quay registry to be up
+NOTE: Quay will install using default StorageClass. Ensure one of the storageclass is set as default
+
+After quay is up
+1. Get the Internal Quay URL from Route
+2. create new account from quay login screen
+3. login using the new user
+
+Select Project quay-enterprise
+
+GO to Workloads -> Secrets -> <internal-quay>-config-bundle-xxxx
+Actions -> edit Secrets
+
+Add
+FEATURE_USER_CREATION: false
+SUPER_USERS:
+- admin
+
+save the secret. Wait 5 minutes for Quay to restart.
+
+To add additional users, 
+remove the FEATUER_USER_CREATION flag.
+Create the new user from quay login screen
+and then
+re-add back the FEATURE_USER_CREATION: false
+into the config-bundle secret
+
+Add quay self-sign cert to the openshift-config
+====================================================
+oc get secret router-certs-default -n openshift-ingress
+
+get the cert and create a new secret under openshift-config
+
+
+get the cert and create new configmap under openshift-config
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: internal-registry-ca
+  namespace: openshift-config
+data:
+  ca-bundle.crt: "-----BEGIN CERTIFICATE-----\r\nMIIDDDCCAfS............OA==\r\n-----END CERTIFICATE-----\r\n"
+
+
+Go to Administration -> Cluster Settings -> Image -> Image Details -> Cluster /YAML 
+add
+
+spec:
+  additionalTrustedCA:
+    name: internal-registry-ca
+
+save the config
+
+
+To allow pods to pull image from internal registry and trust the Cert
+=================================================
+oc patch proxy/cluster --type=merge --patch='{"spec":{"trustedCA":{"name":"internal-registry-ca"}}}'
+
+
+Put quay credetials into openshfit-config
+===========================================
+go to Project -> openshift-config
+open pull-secret
+click Actions -> edit secret
+click add credentials
+enter registry url, username and password
+click save
+This will update machine config and all nodes
+wait for all nodes to be updated
+
+then try to pull from pod again
+
+
+
+Add Allowed Registries to Image Cluster Settings (part of compliance remediation)
+=================================================================================
+
+Go to Administration -> Cluster Settings -> Image -> Image Details -> Cluster /YAML
+
+apiVersion: config.openshift.io/v1
+kind: Image 
+metadata:
+  annotations:
+    release.openshift.io/create-only: "true"
+  name: cluster
+spec:
+  allowedRegistriesForImport: 
+    - domainName: quay.domain.com
+      insecure: false
+  additionalTrustedCA: 
+    name: internal-registry-ca
+  registrySources: 
+    allowedRegistries:
+    - quay.io
+    - registry.redhat.io
+    - quay.domain.com:8443
+    - image-registry.openshift-image-registry.svc:5000
+
+
+
+Deploy and use Nutanix CSI for Nutanix Storage
+===================================================================
+Steps to deploy nutanix CSI
+
+After Nutanic CSI Operator installation, click on Create NutanixCsiStorage
+
+Wait 2 minutes for the NutanixCsiStorage to be up
+
+Create StorageClass (static manual nfs creation)
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nutanix-sc
+annotations:
+  storageClass.kubernetes.io/is-default-class: "false"
+provisioner: csi.nutanix.com
+parameters:
+  nfsServer: ocpfs.domain.com
+  nfsPath: /share1
+  storageType: NutanixFiles
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+
+
+Create Persistent Volume Claim
+------------------------------
+storageClassName: nutanix-sc
+
+THe PVC can be created using UI Dashboard form
+
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: my-pvc
+  namespace: mynamespace
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 4Gi
+  storageClassName: nutanix-sc
+  volumeMode: Filesystem
+
+============================================
+If able to use NutanixCSIOperator (dynamic),
+after creating StorageClass,
+You should only create PVC and specify the storageclass in the PVC.
+The PV will be automatically created by the CSI Driver and mount the PVC into the pod
+If the pod cannot write into the PVC, either change the root squash setting in the Nutanix File Share
+or set the SecurityContext - fsGroup in the pod to change it to match the settings in the file share
+
+
+Secret for dynamic
+----------------------
+data:
+  key: 'value'
+
+Key: key
+Value: <PrismElementIP>:9440:admin:<password>
+
+Example:
+-------------------
+apiVersion: v1
+kind: Secret
+metadata:
+ name: ntnx-secret
+ namespace: kube-system
+data:
+ # base64 encoded prism-ip:prism-port:admin:password.
+ # E.g.: echo -n "10.0.00.000:9440:admin:mypassword" | base64
+ key: MTAuNS42NS4xNTU6OTQ0MDphZG1pbjpOdXRhbml4LjEyMw==
+
+Dynamic Storage Class
+---------------------------------
+
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: nutanix-dynamic-sc
+provisioner: csi.nutanix.com
+parameters:
+  dynamicProv: ENABLED
+  nfsServerName: ocpfs
+  csi.storage.k8s.io/provisioner-secret-name: secret-name
+  csi.storage.k8s.io/provisioner-secret-namespace: kube-system
+  #csi.storage.k8s.io/controller-expand-secret-name: secret-name
+  #csi.storage.k8s.io/controller-expand-secret-namespace: kube-system
+  storageType: NutanixFiles
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+
+
+
+
