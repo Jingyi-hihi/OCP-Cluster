@@ -1,1 +1,2 @@
-
+Boot from rhcos: Bootstrap, Master and Worker
+Boot from rhel: Bastion and HAProxy
