@@ -1,2 +1,21 @@
-Boot from rhcos: Bootstrap, Master and Worker
-Boot from rhel: Bastion and HAProxy
+Boot from rhcos (CD-ROM): Bootstrap, Master and Worker
+Boot from rhel (From cloned image): Bastion, HAProxy and Mirror Registry
+
+For adding repository: (From DVD REPO)
+=========================================================
+mkdir -p /mnt/rhel
+mount -o loop /dev/sr0 /mnt/rhel
+sudo cp /mnt/rhel/media.repo /etc/yum.repos.d/media.repo
+sudo chmod 644 /etc/yum.repos.d/media.repo
+sudo vi /etc/yum.repos.d/media.repo
+
+[dvd-BaseOS]
+name=DVD for RHEL8 - BaseOS
+baseurl=file:///mnt/rhel/BaseOS
+enabled=1
+
+[dvd-AppStream]
+name=DVD for RHEL8 - AppStream
+baseurl=file:///mnt/rhel/AppStream
+enabled=1
+=========================================================
