@@ -1,7 +1,8 @@
 Boot from rhcos (CD-ROM): Bootstrap, Master and Worker
 Boot from rhel (From cloned image): Bastion, HAProxy and Mirror Registry
 
-For adding repository: (From DVD REPO)
+For adding repository: (Bastion, HAProxy and Mirror Registry)
+From CD-ROM
 =========================================================
 mkdir -p /mnt/rhel
 mount -o loop /dev/sr0 /mnt/rhel
@@ -18,4 +19,9 @@ enabled=1
 name=DVD for RHEL8 - AppStream
 baseurl=file:///mnt/rhel/AppStream
 enabled=1
+
+yum clean all
+yum repolist enabled
 =========================================================
+
+For adding users
