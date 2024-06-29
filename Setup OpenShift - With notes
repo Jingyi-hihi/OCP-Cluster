@@ -61,6 +61,7 @@ sudo firewall-cmd --permanent --add-port=6443/tcp
 sudo firewall-cmd --reload
 
 [Adding the HAProxy configuration]
+sudo vi /etc/haproxy/haproxy.cfg
 <Add on>
 frontend stats
   bind *:1936
@@ -84,7 +85,7 @@ listen api-server-6443
   server master0 <master1-hostname>:6443 weight 1 verify none check check-ssl inter 10s fall 2 rise 3
   server master1 <master2-hostname>:6443 weight 1 verify none check check-ssl inter 10s fall 2 rise 3
   server master2 <master3-hostname>:6443 weight 1 verify none check check-ssl inter 10s fall 2 rise 3
-listen machine-config-server-22623 --> Default port used by the Machine Config Server to serve Ignition files and other configuration data to master nodes
+listen machine-config-server-22623 --> Default port used by the Machine Config Server to serve Ignition files and other configuration data to master nodes. The nodes uses the configuration data to set up system services, networking, and other configurations.
   bind *:22623
   mode tcp
   server bootstrap <bootstrap-hostname>:22623 check inter 1s backup
@@ -103,3 +104,96 @@ listen ingress-router-80
   balance source
   server ingress1 <ingress1-hostname>:80 check inter 1s
   server ingress2 <ingress2-hostname>:80 check inter 1s
+
+[Adding the Keepalived configuration]
+sudo vi /etc/keepalived/keepalived.conf
+<1. Add in the VIP address 
+2. Edit the network interface name (If applicable)>
+Master Node
+global_defs {
+  router_id ovp_vrrp #Hostname of this host
+}
+vrrp_script haproxy_check {
+  script "killall -0 haproxy"
+  interval 2
+  weight 100
+}
+
+vrrp_instance OCP_LB {
+  state MASTER # Master -> Primary one that initially holds the Virtual IP address
+  interface enp1s0 # Change if applicable
+  virtual_router_id 215
+  priority 100 # Higher number = Higher priority
+  advert_int 1
+  virtual_ipaddress {
+    <lb-vip> # Add in the VIP address
+  }
+  track_script {
+    haproxy_check
+  }
+  authentication {
+    auth_type PASS
+    auth_pass redhat
+  }
+}
+
+[Enable the services]
+sudo systemctl enable keepalived --now
+sudo systemctl enable haproxy --now
+=========================================================
+
+Setup for HAProxy2
+=========================================================
+sudo yum install haproxy policycoreutils-python-utils keepalived chrony -y
+
+[Adding NTP server]
+vi /etc/resolv.conf
+nameserver xxx.xxx.xxx.xxx
+
+sudo setsebool -P haproxy_connect_any on
+sudo firewall-cmd --permanent --add-service=http
+sudo firewall-cmd --permanent --add-service=https
+sudo firewall-cmd --permanent --add-22623/tcp
+sudo firewall-cmd --permanent --add-port=6443/tcp
+sudo firewall-cmd --reload
+
+[Adding the HAProxy configuration]
+<Same as HAProxy1>
+
+[Adding the Keepalived configuration]
+sudo vi /etc/keepalived/keepalived.conf
+<1. Add in the VIP address 
+2. Edit the network interface name (If applicable)>
+global_defs {
+  router_id ovp_vrrp #hostname of this host
+}
+
+vrrp_script haproxy_check {
+  script "killall -0 haproxy"
+  interval 2
+  weight 90 # Lower as compared to master
+}
+
+vrrp_instance OCP_LB {
+  state BACKUP # Backup -> A backup will take over the VIP if the master instance becomes unavailable
+  interface enp1s0
+  virtual_router_id 215
+  priority 50 # Lower priority as compared to the master
+  advert_int 1
+  virtual_ipaddress {
+    <lb-vip>
+  }
+  track_script {
+    haproxy_check
+  }
+  authentication {
+    auth_type PASS
+    auth_pass redhat
+  }
+}
+
+[Enable the services]
+sudo systemctl enable keepalived --now
+sudo systemctl enable haproxy --now
+=========================================================
+
