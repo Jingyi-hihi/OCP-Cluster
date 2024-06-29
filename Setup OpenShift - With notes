@@ -1,7 +1,7 @@
 Boot from rhcos (CD-ROM): Bootstrap, Master and Worker
-Boot from rhel (From cloned image): Bastion, HAProxy and Mirror Registry
+Boot from rhel (From cloned image): Bastion and HAProxy
 
-For adding repository: (Bastion, HAProxy and Mirror Registry)
+For adding repository: (Bastion and HAProxy)
 From CD-ROM
 =========================================================
 mkdir -p /mnt/rhel
@@ -24,4 +24,25 @@ yum clean all
 yum repolist enabled
 =========================================================
 
-For adding users
+Adding users: (Bastion and HAProxy)
+=========================================================
+useradd ocpa_admin1
+passwd --stdin ocp_admin1
+<Enter a Password>
+usermod -aG wheel ocpa_admin1
+=========================================================
+
+NTP chrony configuration: (Bastion and HAProxy)
+=========================================================
+vi /etc/chrony.conf
+server xxx.xxx.xxx.xxx iburst
+=========================================================
+
+Create Cronjob: (Bastion and HAProxy)
+=========================================================
+[Use root user]
+crontab -e
+0 0 * * 0 find /var/log/audit -type f -name "*.log.*" -mtime +40 -exec rm {} \;
+=========================================================
+
+
