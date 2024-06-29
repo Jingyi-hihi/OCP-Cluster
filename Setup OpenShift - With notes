@@ -45,4 +45,61 @@ crontab -e
 0 0 * * 0 find /var/log/audit -type f -name "*.log.*" -mtime +40 -exec rm {} \;
 =========================================================
 
+Setup for HAProxy1
+=========================================================
+sudo yum install haproxy policycoreutils-python-utils keepalived chrony -y
 
+[Adding NTP server]
+vi /etc/resolv.conf
+nameserver xxx.xxx.xxx.xxx
+
+sudo setsebool -P haproxy_connect_any on --> Allows HAProxy to initiate connections to any address/port, which is necessary to function as intended in scenarios where traffic must be routed to various backend servers.
+sudo firewall-cmd --permanent --add-service=http
+sudo firewall-cmd --permanent --add-service=https
+sudo firewall-cmd --permanent --add-22623/tcp
+sudo firewall-cmd --permanent --add-port=6443/tcp
+sudo firewall-cmd --reload
+
+[Adding the HAProxy configuration]
+<Add on>
+frontend stats
+  bind *:1936
+  mode http
+  log global
+  maxconn 10
+  stats enable
+  stats hide-version
+  stats refresh 30s
+  stats show-node
+  stats show-desc Stats for ocp4 cluster
+  stats auth admin:ocp4
+  stats uri /stats
+listen api-server-6443
+  bind *:6443
+  mode tcp
+  option  httpchk GET /readyz HTTP/1.0
+  option  log-health-checks
+  balance roundrobin
+  server bootstrap <bootstrap-hostname>:6443 verify none check check-ssl inter 10s fall 2 rise 3 backup
+  server master0 <master1-hostname>:6443 weight 1 verify none check check-ssl inter 10s fall 2 rise 3
+  server master1 <master2-hostname>:6443 weight 1 verify none check check-ssl inter 10s fall 2 rise 3
+  server master2 <master3-hostname>:6443 weight 1 verify none check check-ssl inter 10s fall 2 rise 3
+listen machine-config-server-22623 --> Default port used by the Machine Config Server to serve Ignition files and other configuration data to master nodes
+  bind *:22623
+  mode tcp
+  server bootstrap <bootstrap-hostname>:22623 check inter 1s backup
+  server master0 <master1-hostname>:22623 check inter 1s
+  server master1 <master2-hostname>:22623 check inter 1s
+  server master2 <master3-hostname>:22623 check inter 1s
+listen ingress-router-443
+  bind *:443
+  mode tcp
+  balance source
+  server ingress1 <ingress1-hostname>:443 check inter 1s
+  server ingress2 <ingress2-hostname>:443 check inter 1s
+listen ingress-router-80
+  bind *:80
+  mode tcp
+  balance source
+  server ingress1 <ingress1-hostname>:80 check inter 1s
+  server ingress2 <ingress2-hostname>:80 check inter 1s
